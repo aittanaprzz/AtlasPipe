@@ -1,0 +1,12 @@
+data/
+results/
+config/env*.sh
+!config/example_env.sh
+*.out
+*.err
+*.log
+*.tmp
+*.part
+.Rhistory
+.RData
+.DS_Store
