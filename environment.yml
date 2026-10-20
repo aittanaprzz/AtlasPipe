@@ -1,4 +1,4 @@
-name: microbeatlas-pipeline
+name: atlaspipe
 
 # Reference environment for documenting the pipeline dependencies.
 # On the Garnatxa cluster, the official SLURM jobs intentionally use

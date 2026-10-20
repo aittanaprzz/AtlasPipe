@@ -4,6 +4,9 @@
 # Filters community clusters by environment/seqtech/robust projection and
 # selects a reproducible random number of samples per community cluster.
 
+# TRAER EL SCRIPT CATÁLOGO
+# AÑADIR PASO DE OBSERVAR LAS MUESTRAS
+
 library(tidyverse)
 library(data.table)
 
@@ -16,11 +19,11 @@ script_dir <- function() {
 }
 
 PROJECT_ROOT <- Sys.getenv(
-  "MICROBEATLAS_ROOT",
+  "ATLASPIPE_ROOT",
   normalizePath(file.path(script_dir(), ".."), mustWork = FALSE)
 )
-DATA_DIR <- Sys.getenv("MICROBEATLAS_DATA_DIR", file.path(PROJECT_ROOT, "data", "intermediate"))
-IN_DIR <- Sys.getenv("MICROBEATLAS_RAW_DATA_DIR", file.path(PROJECT_ROOT, "data", "raw", "microbeatlas"))
+DATA_DIR <- Sys.getenv("ATLASPIPE_DATA_DIR", file.path(PROJECT_ROOT, "data", "intermediate"))
+IN_DIR <- Sys.getenv("MICROBEATLAS_RAW_DATA_DIR", file.path(PROJECT_ROOT, "data", "raw"))
 BIOM_SAMPLE_IDS_FILE <- Sys.getenv(
   "MICROBEATLAS_BIOM_SAMPLE_IDS",
   file.path(DATA_DIR, "02_filters", "biom_sample_ids.txt")
@@ -33,15 +36,12 @@ ENV_CATALOG_FILE <- Sys.getenv(
 AUTOMATIC_SEED <- 123L
 
 defaults <- list(
-  env = "all",
   env_id = "",
-  env_prefix = "",
-  env_file = "",
-  exclude_env = "",
-  exclude_prefix = "",
+  exclude_env_id = "",
   seqtech = "AMPLICON",
   robust_only = "TRUE",
   samples_per_cc = Sys.getenv("MICROBEATLAS_SAMPLES_PER_CC", "1"),
+  allow_missing_biom_cc = Sys.getenv("MICROBEATLAS_ALLOW_MISSING_BIOM_CC", "FALSE"),
   list_envs = FALSE
 )
 
@@ -54,19 +54,6 @@ split_csv <- function(x) {
   x[x != ""]
 }
 
-read_env_file <- function(path) {
-  if (path == "") {
-    return(character())
-  }
-  if (!file.exists(path)) {
-    stop("No existe el fichero de ambientes: ", path)
-  }
-
-  envs <- trimws(readLines(path, warn = FALSE))
-  envs <- envs[envs != "" & !grepl("^#", envs)]
-  unique(envs)
-}
-
 parse_args <- function(args) {
   opts <- defaults
   i <- 1L
@@ -75,7 +62,7 @@ parse_args <- function(args) {
     arg <- args[[i]]
 
     if (arg %in% c("--help", "-h")) {
-      cat("Uso: Rscript 02_filter_samples_1sampelperCC.R [--list-envs] [--env all|env1,env2] [--env-id 1,3] [--env-prefix prefix] [--env-file file] [--exclude-env 1 2|env1,env2] [--exclude-prefix prefix] [--seqtech AMPLICON] [--robust-only TRUE|FALSE] [--samples-per-cc 1|2|3|all]\n")
+      cat("Uso: Rscript 02_sample_selection.R [--list-envs] [--env-id 1,3] [--exclude-env-id 2,4] [--seqtech AMPLICON] [--robust-only TRUE|FALSE] [--samples-per-cc 1|2|3|all]\n")
       quit(status = 0)
     }
 
@@ -93,7 +80,7 @@ parse_args <- function(args) {
       if (i == length(args) || grepl("^--", args[[i + 1L]])) {
         stop("Falta valor para argumento: ", arg)
       }
-      if (key %in% c("exclude-env", "exclude-prefix")) {
+      if (key %in% c("env-id", "exclude-env-id")) {
         j <- i + 1L
         values <- character()
         while (j <= length(args) && !grepl("^--", args[[j]])) {
@@ -110,18 +97,10 @@ parse_args <- function(args) {
       stop("Argumento no reconocido: ", arg)
     }
 
-    if (key == "env") {
-      opts$env <- value
-    } else if (key == "env-id") {
+    if (key == "env-id") {
       opts$env_id <- value
-    } else if (key == "env-prefix") {
-      opts$env_prefix <- value
-    } else if (key == "env-file") {
-      opts$env_file <- value
-    } else if (key == "exclude-env") {
-      opts$exclude_env <- value
-    } else if (key == "exclude-prefix") {
-      opts$exclude_prefix <- value
+    } else if (key == "exclude-env-id") {
+      opts$exclude_env_id <- value
     } else if (key == "seqtech") {
       opts$seqtech <- value
     } else if (key == "robust-only") {
@@ -171,61 +150,56 @@ sanitize_label <- function(x) {
 }
 
 default_env_label <- function(opts) {
-  env_prefix <- split_csv(opts$env_prefix)
-  if (length(env_prefix) > 0) {
-    return(paste(sanitize_label(env_prefix), collapse = "-"))
-  }
-
   env_id <- split_csv(opts$env_id)
-  env_file <- trimws(opts$env_file)
-  env <- split_csv(opts$env)
-  if (length(env_id) > 0 || env_file != "") {
-    return("customenv")
-  }
-  if (length(env) == 0 || identical(tolower(env), "all")) {
+  exclude_env_id <- split_csv(opts$exclude_env_id)
+  if (length(env_id) == 0) {
     return("all")
   }
-  paste(sanitize_label(env), collapse = "-")
+  label <- paste0("env", paste(env_id, collapse = "-"))
+  if (length(exclude_env_id) > 0) {
+    label <- paste0(label, "_exclude", paste(exclude_env_id, collapse = "-"))
+  }
+  sanitize_label(label)
 }
 
-resolve_env_refs <- function(refs, env_catalog, option_name) {
+resolve_env_ids <- function(refs, env_catalog, option_name) {
   refs <- split_csv(refs)
   if (length(refs) == 0) {
     return(character())
   }
 
-  is_idx <- grepl("^[0-9]+$", refs)
-  if (all(is_idx)) {
-    idx <- as.integer(refs)
-    invalid_idx <- idx[idx < 1L | idx > nrow(env_catalog)]
-    if (length(invalid_idx) > 0) {
-      stop(
-        option_name,
-        " fuera de rango: ",
-        paste(invalid_idx, collapse = ", "),
-        ". Mira el catalogo en: ",
-        ENV_CATALOG_FILE
-      )
-    }
-    return(unique(env_catalog$Env_cons[idx]))
-  }
-
-  if (any(is_idx)) {
-    stop(option_name, " no puede mezclar indices numericos y nombres de ambientes en el mismo argumento")
-  }
-
-  invalid_env <- setdiff(refs, env_catalog$Env_cons)
-  if (length(invalid_env) > 0) {
+  invalid_refs <- refs[!grepl("^[0-9]+$", refs)]
+  if (length(invalid_refs) > 0) {
     stop(
       option_name,
-      " contiene ambientes no disponibles tras los filtros base: ",
-      paste(invalid_env, collapse = ", "),
+      " solo acepta numeros del catalogo de ambientes. Valores invalidos: ",
+      paste(invalid_refs, collapse = ", "),
+      ". Usa --list-envs para ver los numeros disponibles."
+    )
+  }
+
+  idx <- as.integer(refs)
+  invalid_idx <- idx[idx < 1L | idx > nrow(env_catalog)]
+  if (length(invalid_idx) > 0) {
+    stop(
+      option_name,
+      " fuera de rango: ",
+      paste(invalid_idx, collapse = ", "),
       ". Mira el catalogo en: ",
       ENV_CATALOG_FILE
     )
   }
 
-  unique(refs)
+  unique(env_catalog$Env_cons[idx])
+}
+
+matches_env_tree <- function(env_values, roots) {
+  if (length(roots) == 0) {
+    return(rep(FALSE, length(env_values)))
+  }
+  Reduce(`|`, lapply(roots, function(root) {
+    env_values == root | startsWith(env_values, paste0(root, ";"))
+  }))
 }
 
 filter_base_metadata <- function(metadata, opts) {
@@ -241,44 +215,17 @@ filter_base_metadata <- function(metadata, opts) {
 }
 
 select_environments <- function(metadata, opts, env_catalog) {
-  env_exact <- split_csv(opts$env)
-  env_prefix <- split_csv(opts$env_prefix)
-  env_from_file <- read_env_file(opts$env_file)
+  selected_roots <- resolve_env_ids(opts$env_id, env_catalog, "--env-id")
+  excluded_roots <- resolve_env_ids(opts$exclude_env_id, env_catalog, "--exclude-env-id")
 
-  use_all_envs <- length(env_exact) == 0 || identical(tolower(env_exact), "all")
-  if (
-    use_all_envs &&
-    length(split_csv(opts$env_id)) == 0 &&
-    length(env_prefix) == 0 &&
-    length(env_from_file) == 0
-  ) {
+  if (length(selected_roots) == 0) {
     keep <- rep(TRUE, nrow(metadata))
   } else {
-    env_exact <- env_exact[tolower(env_exact) != "all"]
-    env_exact <- unique(c(env_exact, env_from_file))
-    env_exact <- unique(c(env_exact, resolve_env_refs(opts$env_id, env_catalog, "--env-id")))
-
-    keep <- rep(FALSE, nrow(metadata))
-    if (length(env_exact) > 0) {
-      keep <- keep | metadata$Env_cons %in% env_exact
-    }
-    if (length(env_prefix) > 0) {
-      keep <- keep | Reduce(`|`, lapply(env_prefix, function(prefix) {
-        startsWith(metadata$Env_cons, prefix)
-      }))
-    }
+    keep <- matches_env_tree(metadata$Env_cons, selected_roots)
   }
 
-  exclude_env <- resolve_env_refs(opts$exclude_env, env_catalog, "--exclude-env")
-  exclude_prefix <- split_csv(opts$exclude_prefix)
-  if (length(exclude_env) > 0) {
-    keep <- keep & !(metadata$Env_cons %in% exclude_env)
-  }
-  if (length(exclude_prefix) > 0) {
-    drop_by_prefix <- Reduce(`|`, lapply(exclude_prefix, function(prefix) {
-      startsWith(metadata$Env_cons, prefix)
-    }))
-    keep <- keep & !drop_by_prefix
+  if (length(excluded_roots) > 0) {
+    keep <- keep & !matches_env_tree(metadata$Env_cons, excluded_roots)
   }
 
   metadata[keep, ]
@@ -351,6 +298,14 @@ BIOM_SUBSET_IDS_FILE <- Sys.getenv(
   "MICROBEATLAS_FILTER_BIOM_SUBSET_IDS_FILE",
   file.path(OUT_DIR, paste0("community_cluster_selection_", selection_name, "_forbiomsubset.txt"))
 )
+SAMPLE_METADATA_FILE <- Sys.getenv(
+  "MICROBEATLAS_SAMPLE_METADATA_FILE",
+  file.path(OUT_DIR, paste0("sample_metadata_", selection_name, ".tsv"))
+)
+SELECTED_ENV_COUNTS_FILE <- Sys.getenv(
+  "MICROBEATLAS_SELECTED_ENV_COUNTS_FILE",
+  file.path(OUT_DIR, paste0("selected_environment_counts_", selection_name, ".tsv"))
+)
 
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(dirname(ENV_CATALOG_FILE), recursive = TRUE, showWarnings = FALSE)
@@ -391,12 +346,26 @@ if (is.null(biom_sample_ids)) {
 
 missing_cc <- setdiff(unique(cc_mapping_filtered$ComClustID), unique(cc_mapping_for_sampling$ComClustID))
 if (length(missing_cc) > 0) {
-  stop(
+  missing_message <- paste0(
     "Hay ",
     length(missing_cc),
     " community clusters sin ninguna muestra presente en el BIOM. Ejemplos: ",
     paste(head(missing_cc, 10), collapse = ", ")
   )
+
+  if (!is_true(opts$allow_missing_biom_cc)) {
+    stop(missing_message)
+  }
+
+  warning(
+    missing_message,
+    ". Se continuara solo con los community clusters disponibles en el BIOM porque ",
+    "MICROBEATLAS_ALLOW_MISSING_BIOM_CC=TRUE."
+  )
+}
+
+if (nrow(cc_mapping_for_sampling) == 0) {
+  stop("No quedan muestras disponibles tras intersectar la seleccion con el BIOM")
 }
 
 if (is.na(samples_per_cc)) {
@@ -430,26 +399,47 @@ fwrite(
   col.names = FALSE
 )
 
+sample_metadata <- cc_mapping_sampled %>%
+  ungroup() %>%
+  mutate(
+    MICROBEATLAS_ENV_ROOT = sub(";.*$", "", Env_cons),
+    SAMPLE_SOURCE = "MicrobeAtlas"
+  ) %>%
+  select(
+    SampleID,
+    SAMPLE_SOURCE,
+    ComClustID,
+    Env_cons,
+    MICROBEATLAS_ENV_ROOT,
+    SeqTech_cons,
+    Robust_projection,
+    Keyw_cons,
+    Proj_cons
+  ) %>%
+  distinct()
+fwrite(sample_metadata, file = SAMPLE_METADATA_FILE, sep = "\t")
+
+selected_env_counts <- as.data.table(sample_metadata)[
+  ,
+  .(
+    n_samples = uniqueN(SampleID),
+    n_community_clusters = uniqueN(ComClustID)
+  ),
+  by = .(MICROBEATLAS_ENV_ROOT, Env_cons)
+]
+setorder(selected_env_counts, MICROBEATLAS_ENV_ROOT, Env_cons)
+fwrite(selected_env_counts, file = SELECTED_ENV_COUNTS_FILE, sep = "\t")
+
 selected_envs <- sort(unique(cc_mapping_filtered$Env_cons))
-excluded_by_env <- resolve_env_refs(opts$exclude_env, env_catalog, "--exclude-env")
-exclude_prefix <- split_csv(opts$exclude_prefix)
-excluded_by_prefix <- character()
-if (length(exclude_prefix) > 0) {
-  excluded_by_prefix <- unique(unlist(lapply(exclude_prefix, function(prefix) {
-    env_catalog$Env_cons[startsWith(env_catalog$Env_cons, prefix)]
-  })))
-}
-excluded_envs <- sort(unique(c(excluded_by_env, excluded_by_prefix)))
+excluded_roots <- resolve_env_ids(opts$exclude_env_id, env_catalog, "--exclude-env-id")
+excluded_envs <- sort(unique(env_catalog$Env_cons[matches_env_tree(env_catalog$Env_cons, excluded_roots)]))
 summary_table <- data.table(
   parameter = c(
-    "env_argument",
     "env_id",
-    "env_prefix",
-    "env_file",
-    "exclude_env",
-    "exclude_prefix",
+    "exclude_env_id",
     "seqtech",
     "robust_only",
+    "allow_missing_biom_cc",
     "seed",
     "seed_source",
     "samples_per_cc",
@@ -458,6 +448,8 @@ summary_table <- data.table(
     "biom_sample_ids_file",
     "selection_file",
     "biom_subset_ids_file",
+    "sample_metadata_file",
+    "selected_environment_counts_file",
     "biom_sample_ids_available",
     "selected_envs",
     "excluded_envs",
@@ -465,19 +457,18 @@ summary_table <- data.table(
     "n_community_clusters",
     "n_samples_all",
     "n_samples_available_for_sampling",
+    "n_community_clusters_missing_from_biom",
+    "missing_from_biom_examples",
     "n_community_clusters_below_requested_samples",
     "n_sampled_rows",
     "n_sampled_unique_samples"
   ),
   value = c(
-    opts$env,
     opts$env_id,
-    opts$env_prefix,
-    opts$env_file,
-    opts$exclude_env,
-    opts$exclude_prefix,
+    opts$exclude_env_id,
     opts$seqtech,
     opts$robust_only,
+    opts$allow_missing_biom_cc,
     AUTOMATIC_SEED,
     "automatic_internal",
     ifelse(is.na(samples_per_cc), "all", samples_per_cc),
@@ -486,6 +477,8 @@ summary_table <- data.table(
     BIOM_SAMPLE_IDS_FILE,
     SELECTION_FILE,
     BIOM_SUBSET_IDS_FILE,
+    SAMPLE_METADATA_FILE,
+    SELECTED_ENV_COUNTS_FILE,
     !is.null(biom_sample_ids),
     paste(selected_envs, collapse = ","),
     paste(excluded_envs, collapse = ","),
@@ -493,6 +486,8 @@ summary_table <- data.table(
     uniqueN(cc_mapping_filtered$ComClustID),
     uniqueN(cc_mapping_filtered$SampleID),
     uniqueN(cc_mapping_for_sampling$SampleID),
+    length(missing_cc),
+    paste(head(missing_cc, 50), collapse = ","),
     clusters_below_requested_samples,
     nrow(cc_mapping_sampled),
     uniqueN(cc_mapping_sampled$SampleID)

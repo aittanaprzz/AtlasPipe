@@ -30,7 +30,7 @@ parse_args <- function() {
 
 read_fasta_ids <- function(path) {
   if (!file.exists(path)) {
-    stop("No existe el FASTA de ASVs no mapeados: ", path)
+    stop("No existe el FASTA de amplicones no mapeados: ", path)
   }
 
   con <- file(path, open = "r")
@@ -53,7 +53,7 @@ read_fasta_ids <- function(path) {
 
 empty_feature_map <- function() {
   data.table(
-    ASV = character(),
+    AMPLICON_ID = character(),
     FEATURE_ID = character(),
     FEATURE_TYPE = character(),
     assignment_source = character(),
@@ -79,7 +79,7 @@ build_cluster_tables <- function(uc_path, nohit_fasta_path) {
   duplicated_nohit <- unique(nohit_ids[duplicated(nohit_ids)])
   if (length(duplicated_nohit) > 0) {
     stop(
-      "ASVs duplicados en ASVs_no_hits.fasta. Ejemplos: ",
+      "amplicones duplicados en amplicons_no_hits.fasta. Ejemplos: ",
       paste(head(duplicated_nohit, 10), collapse = ", ")
     )
   }
@@ -92,7 +92,7 @@ build_cluster_tables <- function(uc_path, nohit_fasta_path) {
   }
 
   if (!file.exists(uc_path)) {
-    stop("No existe el fichero .uc de clustering de ASVs no mapeados: ", uc_path)
+    stop("No existe el fichero .uc de clustering de amplicones no mapeados: ", uc_path)
   }
 
   uc <- fread(uc_path, header = FALSE, fill = TRUE, colClasses = "character")
@@ -102,11 +102,11 @@ build_cluster_tables <- function(uc_path, nohit_fasta_path) {
 
   seeds <- uc[
     V1 == "S" & !is.na(V2) & V2 != "" & !is.na(V9) & V9 != "",
-    .(cluster_id = V2, ASV = V9, cluster_centroid = V9)
+    .(cluster_id = V2, AMPLICON_ID = V9, cluster_centroid = V9)
   ]
   hits <- uc[
     V1 == "H" & !is.na(V2) & V2 != "" & !is.na(V9) & V9 != "" & !is.na(V10) & V10 != "*",
-    .(cluster_id = V2, ASV = V9, cluster_centroid = V10)
+    .(cluster_id = V2, AMPLICON_ID = V9, cluster_centroid = V10)
   ]
 
   cluster_map <- rbindlist(list(seeds, hits), use.names = TRUE)
@@ -114,22 +114,22 @@ build_cluster_tables <- function(uc_path, nohit_fasta_path) {
     stop("El fichero .uc no contiene filas S/H validas: ", uc_path)
   }
 
-  duplicated_assignments <- unique(cluster_map$ASV[duplicated(cluster_map$ASV)])
+  duplicated_assignments <- unique(cluster_map$AMPLICON_ID[duplicated(cluster_map$AMPLICON_ID)])
   if (length(duplicated_assignments) > 0) {
     stop(
-      "ASVs con mas de una asignacion en .uc. Ejemplos: ",
+      "amplicones con mas de una asignacion en .uc. Ejemplos: ",
       paste(head(duplicated_assignments, 10), collapse = ", ")
     )
   }
 
-  missing_in_uc <- setdiff(nohit_ids, cluster_map$ASV)
-  extra_in_uc <- setdiff(cluster_map$ASV, nohit_ids)
+  missing_in_uc <- setdiff(nohit_ids, cluster_map$AMPLICON_ID)
+  extra_in_uc <- setdiff(cluster_map$AMPLICON_ID, nohit_ids)
   if (length(missing_in_uc) > 0 || length(extra_in_uc) > 0) {
     stop(
-      "Incoherencia ASVs_no_hits.fasta vs .uc. ",
-      "ASVs del FASTA ausentes en .uc: ", length(missing_in_uc),
+      "Incoherencia amplicons_no_hits.fasta vs .uc. ",
+      "amplicones del FASTA ausentes en .uc: ", length(missing_in_uc),
       if (length(missing_in_uc) > 0) paste0(" (ejemplos: ", paste(head(missing_in_uc, 10), collapse = ", "), ")") else "",
-      ". ASVs extra en .uc: ", length(extra_in_uc),
+      ". amplicones extra en .uc: ", length(extra_in_uc),
       if (length(extra_in_uc) > 0) paste0(" (ejemplos: ", paste(head(extra_in_uc, 10), collapse = ", "), ")") else ""
     )
   }
@@ -138,35 +138,27 @@ build_cluster_tables <- function(uc_path, nohit_fasta_path) {
     ,
     .(
       cluster_centroid = cluster_centroid[1],
-      cluster_size = uniqueN(ASV)
+      cluster_size = uniqueN(AMPLICON_ID)
     ),
     by = cluster_id
   ]
-  cluster_sizes[, FEATURE_TYPE := fifelse(cluster_size >= 2, "Own_ASVcluster97", "Own_ASVsingleton")]
-  cluster_sizes[, FEATURE_ID := fifelse(
-    cluster_size >= 2,
-    paste0("ASVcluster97_", cluster_centroid),
-    paste0("ASVsingleton_", cluster_centroid)
-  )]
+  cluster_sizes[, FEATURE_TYPE := "Own_cluster97"]
+  cluster_sizes[, FEATURE_ID := paste0("cluster97_", cluster_centroid)]
   setcolorder(cluster_sizes, c("cluster_id", "FEATURE_ID", "FEATURE_TYPE", "cluster_centroid", "cluster_size"))
   cluster_sizes[, cluster_order := as.integer(cluster_id)]
   setorder(cluster_sizes, cluster_order)
   cluster_sizes[, cluster_order := NULL]
 
   feature_map <- merge(cluster_map, cluster_sizes, by = c("cluster_id", "cluster_centroid"))
-  feature_map[, is_centroid := ASV == cluster_centroid]
-  feature_map[, assignment_source := fifelse(
-    FEATURE_TYPE == "Own_ASVcluster97",
-    "own_nohit_cluster97",
-    "own_nohit_singleton"
-  )]
+  feature_map[, is_centroid := AMPLICON_ID == cluster_centroid]
+  feature_map[, assignment_source := "own_nohit_97cluster"]
   feature_map <- feature_map[
     ,
-    .(ASV, FEATURE_ID, FEATURE_TYPE, assignment_source, cluster_id, cluster_centroid, cluster_size, is_centroid)
+    .(AMPLICON_ID, FEATURE_ID, FEATURE_TYPE, assignment_source, cluster_id, cluster_centroid, cluster_size, is_centroid)
   ]
   feature_map[, cluster_order := as.integer(cluster_id)]
   feature_map[, non_centroid_order := !is_centroid]
-  setorder(feature_map, cluster_order, non_centroid_order, ASV)
+  setorder(feature_map, cluster_order, non_centroid_order, AMPLICON_ID)
   feature_map[, c("cluster_order", "non_centroid_order") := NULL]
 
   list(
@@ -177,31 +169,25 @@ build_cluster_tables <- function(uc_path, nohit_fasta_path) {
 
 write_summary <- function(tables, out_file) {
   sizes <- tables$cluster_sizes$cluster_size
-  nohit_asvs_total <- nrow(tables$feature_map)
-  own_clusters97_total <- sum(tables$cluster_sizes$FEATURE_TYPE == "Own_ASVcluster97")
-  own_singletons_total <- sum(tables$cluster_sizes$FEATURE_TYPE == "Own_ASVsingleton")
-  asvs_in_own_clusters97 <- sum(tables$cluster_sizes[FEATURE_TYPE == "Own_ASVcluster97"]$cluster_size)
-  asvs_singleton_unmapped <- sum(tables$cluster_sizes[FEATURE_TYPE == "Own_ASVsingleton"]$cluster_size)
+  nohit_amplicons_total <- nrow(tables$feature_map)
+  own_novel_clusters_total <- sum(tables$cluster_sizes$FEATURE_TYPE == "Own_cluster97")
+  amplicons_in_own_clusters97 <- sum(tables$cluster_sizes[FEATURE_TYPE == "Own_cluster97"]$cluster_size)
 
   summary <- data.table(
     metric = c(
-      "nohit_asvs_total",
-      "own_clusters97_total",
-      "own_singletons_total",
-      "own_features_total",
-      "asvs_in_own_clusters97",
-      "asvs_singleton_unmapped",
+      "nohit_amplicons_total",
+      "own_novel_clusters_total",
+      "own_novel_features_total",
+      "amplicons_in_own_novel_clusters",
       "smallest_cluster_size",
       "median_cluster_size",
       "largest_cluster_size"
     ),
     value = c(
-      nohit_asvs_total,
-      own_clusters97_total,
-      own_singletons_total,
-      own_clusters97_total + own_singletons_total,
-      asvs_in_own_clusters97,
-      asvs_singleton_unmapped,
+      nohit_amplicons_total,
+      own_novel_clusters_total,
+      own_novel_clusters_total,
+      amplicons_in_own_clusters97,
       if (length(sizes) > 0) min(sizes) else 0,
       if (length(sizes) > 0) median(sizes) else 0,
       if (length(sizes) > 0) max(sizes) else 0
@@ -212,31 +198,34 @@ write_summary <- function(tables, out_file) {
 
 args <- parse_args()
 PROJECT_ROOT <- Sys.getenv(
-  "MICROBEATLAS_ROOT",
+  "ATLASPIPE_ROOT",
   normalizePath(file.path(script_dir(), ".."), mustWork = FALSE)
 )
-DATA_DIR <- Sys.getenv("MICROBEATLAS_DATA_DIR", file.path(PROJECT_ROOT, "data", "intermediate"))
-IN_DIR <- Sys.getenv("MICROBEATLAS_VSEARCH_DIR", file.path(DATA_DIR, "05_vsearch"))
+DATA_DIR <- Sys.getenv("ATLASPIPE_DATA_DIR", file.path(PROJECT_ROOT, "data", "intermediate"))
+IN_DIR <- Sys.getenv(
+  "ATLASPIPE_OWN_AMPLICON_MAPPING_DIR",
+  file.path(DATA_DIR, "05_amplicon_mapping")
+)
 
 uc_file <- args[["uc"]]
 if (is.null(uc_file)) {
-  uc_file <- Sys.getenv("MICROBEATLAS_NO_HITS_UC", file.path(IN_DIR, "ASVs_no_hits_clustering97.uc"))
+  uc_file <- Sys.getenv("ATLASPIPE_OWN_NO_HITS_UC", file.path(IN_DIR, "amplicon_clusters97.uc"))
 }
 nohit_fasta <- args[["nohit-fasta"]]
 if (is.null(nohit_fasta)) {
-  nohit_fasta <- Sys.getenv("MICROBEATLAS_NO_HITS_FASTA", file.path(IN_DIR, "ASVs_no_hits.fasta"))
+  nohit_fasta <- Sys.getenv("ATLASPIPE_OWN_NO_HITS_FASTA", file.path(IN_DIR, "amplicons_no_hits.fasta"))
 }
 feature_map_file <- args[["feature-map"]]
 if (is.null(feature_map_file)) {
-  feature_map_file <- Sys.getenv("MICROBEATLAS_NO_HITS_FEATURE_MAP", file.path(IN_DIR, "ASVs_no_hits_feature_map.tsv"))
+  feature_map_file <- Sys.getenv("ATLASPIPE_OWN_NO_HITS_FEATURE_MAP", file.path(IN_DIR, "amplicon_cluster_map.tsv"))
 }
 cluster_sizes_file <- args[["cluster-sizes"]]
 if (is.null(cluster_sizes_file)) {
-  cluster_sizes_file <- Sys.getenv("MICROBEATLAS_NO_HITS_CLUSTER_SIZES", file.path(IN_DIR, "ASVs_no_hits_cluster_sizes.tsv"))
+  cluster_sizes_file <- Sys.getenv("ATLASPIPE_OWN_NO_HITS_CLUSTER_SIZES", file.path(IN_DIR, "cluster_sizes.tsv"))
 }
 summary_file <- args[["summary"]]
 if (is.null(summary_file)) {
-  summary_file <- Sys.getenv("MICROBEATLAS_NO_HITS_CLUSTER_SUMMARY", file.path(IN_DIR, "ASVs_no_hits_clustering97_summary.tsv"))
+  summary_file <- Sys.getenv("ATLASPIPE_OWN_NO_HITS_CLUSTER_SUMMARY", file.path(IN_DIR, "cluster_summary97.tsv"))
 }
 
 dir.create(dirname(feature_map_file), recursive = TRUE, showWarnings = FALSE)
@@ -248,6 +237,6 @@ fwrite(tables$feature_map, feature_map_file, sep = "\t")
 fwrite(tables$cluster_sizes, cluster_sizes_file, sep = "\t")
 write_summary(tables, summary_file)
 
-cat("Mapa ASV no-hit -> feature propia:", feature_map_file, "\n")
+cat("Mapa AMPLICON_ID no-hit -> feature propia:", feature_map_file, "\n")
 cat("Tamanos de clusters propios:", cluster_sizes_file, "\n")
-cat("Resumen clustering ASVs no-hit:", summary_file, "\n")
+cat("Resumen clustering amplicones no-hit:", summary_file, "\n")

@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 
-# Genera un multifasta de referencia con las secuencias de los OTUs presentes
-# en todas las muestras filtradas de MicrobeAtlas.
+# Builds a reference FASTA with the OTU sequences present in the filtered
+# MicrobeAtlas samples.
 
 
 script_dir <- function() {
@@ -13,11 +13,11 @@ script_dir <- function() {
 }
 
 PROJECT_ROOT <- Sys.getenv(
-  "MICROBEATLAS_ROOT",
+  "ATLASPIPE_ROOT",
   normalizePath(file.path(script_dir(), ".."), mustWork = FALSE)
 )
-IN_DIR <- Sys.getenv("MICROBEATLAS_DATA_DIR", file.path(PROJECT_ROOT, "data", "intermediate"))
-RAW_DATA_DIR <- Sys.getenv("MICROBEATLAS_RAW_DATA_DIR", file.path(PROJECT_ROOT, "data", "raw", "microbeatlas"))
+IN_DIR <- Sys.getenv("ATLASPIPE_DATA_DIR", file.path(PROJECT_ROOT, "data", "intermediate"))
+RAW_DATA_DIR <- Sys.getenv("MICROBEATLAS_RAW_DATA_DIR", file.path(PROJECT_ROOT, "data", "raw"))
 ENV_LABEL <- Sys.getenv("MICROBEATLAS_ENV_LABEL", "aquatic")
 
 selection_label_from_samples_per_cc <- function(x) {
@@ -55,15 +55,21 @@ SEQ_FILE <- Sys.getenv(
   file.path(RAW_DATA_DIR, "otus.97.allinfo")
 )
 
-OUT_DIR <- Sys.getenv("MICROBEATLAS_MULTIFASTA_DIR", file.path(IN_DIR, "04_multifasta"))
+OUT_DIR <- Sys.getenv(
+  "MICROBEATLAS_REFERENCE_FASTA_DIR",
+  Sys.getenv("MICROBEATLAS_MULTIFASTA_DIR", file.path(IN_DIR, "04_reference_fasta"))
+)
 OUT_FILE <- file.path(
   OUT_DIR,
   paste0("MicrobeAtlas_selection_", ENV_LABEL, "_", SELECTION_LABEL, "_otus.97.fasta")
 )
 OUT_FILE <- Sys.getenv("MICROBEATLAS_OTU_FASTA", OUT_FILE)
 SUMMARY_FILE <- Sys.getenv(
-  "MICROBEATLAS_MULTIFASTA_SUMMARY",
-  file.path(dirname(OUT_FILE), paste0("multifasta_summary", SUMMARY_SUFFIX, ".tsv"))
+  "MICROBEATLAS_REFERENCE_FASTA_SUMMARY",
+  Sys.getenv(
+    "MICROBEATLAS_MULTIFASTA_SUMMARY",
+    file.path(dirname(OUT_FILE), paste0("reference_fasta_summary", SUMMARY_SUFFIX, ".tsv"))
+  )
 )
 
 if (!file.exists(ID_OTU_FILE)) {
@@ -85,6 +91,17 @@ dir.create(dirname(OUT_FILE), recursive = TRUE, showWarnings = FALSE)
 # El TSV generado por biom convert tiene una primera linea de comentario y la
 # cabecera real en la segunda linea. Conservamos solo OTUs 97_* con abundancia
 # positiva en al menos una muestra; la fila Unmapped no es una secuencia OTU.
+# El BIOM rod2025companion prefija algunos OTUs con dominio (A97_, B97_, E97_).
+# Mantenemos ese prefijo en el FASTA para no mezclar namespaces, pero buscamos
+# las secuencias en otus.97.allinfo usando el ID base 97_*.
+is_otu97_id <- function(x) {
+  grepl("^[ABE]?97_", x)
+}
+
+otu97_base_id <- function(x) {
+  sub("^[ABE](97_)", "\\1", x)
+}
+
 open_text <- function(path) {
   if (grepl("\\.gz$", path)) {
     return(gzfile(path, open = "rt"))
@@ -93,6 +110,7 @@ open_text <- function(path) {
 }
 
 selected_lookup <- new.env(hash = TRUE, parent = emptyenv())
+selected_by_base <- new.env(hash = TRUE, parent = emptyenv())
 
 otu_con <- open_text(ID_OTU_FILE)
 on.exit(close(otu_con), add = TRUE)
@@ -144,7 +162,7 @@ repeat {
       next
     }
 
-    if (!grepl("^97_", otu_id)) {
+    if (!is_otu97_id(otu_id)) {
       n_other_ignored <- n_other_ignored + 1L
       next
     }
@@ -157,6 +175,13 @@ repeat {
       n_rows_97_positive <- n_rows_97_positive + 1L
       if (!exists(otu_id, envir = selected_lookup, inherits = FALSE)) {
         assign(otu_id, TRUE, envir = selected_lookup)
+        base_id <- otu97_base_id(otu_id)
+        selected_for_base <- if (exists(base_id, envir = selected_by_base, inherits = FALSE)) {
+          get(base_id, envir = selected_by_base, inherits = FALSE)
+        } else {
+          character()
+        }
+        assign(base_id, c(selected_for_base, otu_id), envir = selected_by_base)
         n_selected <- n_selected + 1L
       }
     } else {
@@ -205,13 +230,16 @@ repeat {
     sequence <- record[7]
 
     if (
-      exists(otu_id, envir = selected_lookup, inherits = FALSE) &&
-      !exists(otu_id, envir = found_lookup, inherits = FALSE) &&
+      exists(otu_id, envir = selected_by_base, inherits = FALSE) &&
       !is.na(sequence) &&
       sequence != ""
     ) {
-      writeLines(c(paste0(">", otu_id), sequence), out_con)
-      assign(otu_id, TRUE, envir = found_lookup)
+      for (selected_id in get(otu_id, envir = selected_by_base, inherits = FALSE)) {
+        if (!exists(selected_id, envir = found_lookup, inherits = FALSE)) {
+          writeLines(c(paste0(">", selected_id), sequence), out_con)
+          assign(selected_id, TRUE, envir = found_lookup)
+        }
+      }
     }
   }
 }
@@ -280,16 +308,20 @@ write.table(
   quote = FALSE
 )
 
+if (length(ls(found_lookup)) == 0) {
+  stop("No se encontro ninguna secuencia para los OTUs seleccionados.")
+}
+
 if (length(missing_otus) > 0) {
-  stop(
+  warning(
     "Faltan secuencias para ",
     length(missing_otus),
-    " OTUs seleccionados. Ejemplos: ",
+    " OTUs seleccionados; se omitiran del FASTA de referencia. Ejemplos: ",
     paste(head(missing_otus, 10), collapse = ", ")
   )
 }
 
 message("Multifasta generado: ", OUT_FILE)
 message("Numero de secuencias: ", length(ls(found_lookup)))
-message("Resumen multifasta: ", SUMMARY_FILE)
+message("Reference FASTA summary: ", SUMMARY_FILE)
 print(summary_table, row.names = FALSE)
